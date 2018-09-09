@@ -1,0 +1,33 @@
+\usepackage{graphicx}
+\usepackage[caption=false]{subfig}
+\usepackage[export]{adjustbox}
+\setbeamertemplate{navigation symbols}{}
+
+\titlegraphic{
+\begin{center}
+\includegraphics[width=0.6\textwidth]{./images/logo3.pdf}
+\end{center}}
+
+\setbeamertemplate{title page}
+  {\begin{center}
+      {\usebeamerfont{title}\usebeamercolor[fg]{title}\inserttitle}\\[4ex]
+      {\usebeamerfont{author}\usebeamercolor[fg]{author}\insertauthor}\\[4ex]
+      \insertdate
+      \inserttitlegraphic
+    \end{center}
+    }
+
+\hypersetup{%
+  colorlinks=true,% hyperlinks will be coloured
+  linkcolor=green,% hyperlink text will be green
+  linkbordercolor=red,% hyperlink border will be red
+}
+
+\makeatletter
+\Hy@AtBeginDocument{%
+  \def\@pdfborder{0 0 1}% Overrides border definition set with colorlinks=true
+  \def\@pdfborderstyle{/S/U/W 1}% Overrides border style set with colorlinks=true
+                                % Hyperlink border style will be underline of width 1pt
+}
+\makeatother
+

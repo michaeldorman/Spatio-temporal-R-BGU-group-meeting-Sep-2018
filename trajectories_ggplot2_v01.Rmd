@@ -1,0 +1,396 @@
+---
+title: "Visualizing trajectory direction with `ggplot2`"
+author: Michael Dorman
+date: "2018-09-12"
+output: 
+  html_document: 
+    toc: true
+    toc_float: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache = FALSE)
+# options(width = 100)
+```
+
+## Motivation
+
+![https://oscarperpinan.github.io/rastervis/](https://oscarperpinan.github.io/rastervis/figs/vectorplot.png)
+
+* Aim: recreate a "vectorplot" in `ggplot2`, but using a real dataset rather than a synthetic example 
+* Specifically - 
+    * We have a dataset with storm trajectories
+    * We want to display a regular grid with of arrow segments, with direction and length representing the direction and intensity of storms passing through that grid cell
+* How do we do that? 
+    * Convert the trajectories to individual segments
+    * Calculate the azimuth of each storm segment
+    * Make a regular grid
+    * Summarize the average azimuth and total length of storm segments
+    * Calculate gridded segments, according average azimuth and total length in each cell
+    * Plot
+
+## Storms dataset
+
+```{r}
+library(dplyr)
+
+storms = as.data.frame(storms)
+head(storms)
+```
+
+## Storm ID
+
+* There are storms with the same name in different years 
+* To identify individual storm tracks we add a `name_year` ID variable -
+
+```{r}
+storms$name_year = paste(storms$name, storms$year)
+head(storms)
+```
+
+## To points
+
+* The table is converted to a point layer with `st_as_sf` using the `long` and `lat` columns -
+
+```{r}
+library(sf)
+
+pnt = st_as_sf(storms, coords = c("long", "lat"), crs = 4326)
+pnt
+```
+
+## Plot
+
+```{r}
+plot(pnt, max.plot = 12)
+```
+
+## Points to lines
+
+* Next we want to create a layer of line segments between all consecutive points of each storm
+* First we split the point layer by storm ID, to get a `list` of `POINT` subsets - 
+
+```{r}
+lines = split(pnt, pnt$name_year)
+lines[1]
+```
+
+* Then, we combine the points to `MULTIPOINT` with `st_combine` - 
+
+```{r}
+lines = lapply(lines, st_combine)
+lines[1]
+```
+
+* Casting to `LINESTRING` - 
+
+```{r}
+lines = lapply(lines, st_cast, "LINESTRING")
+lines[1]
+```
+
+* The `list` of `LINESTRING` can be combined back to a geometry column with `c` - 
+
+```{r}
+geometry = do.call(c, lines)
+geometry
+```
+
+* The corresponding attribute `name_year` is kept in the `list` element names - 
+
+```{r}
+attr = data.frame(name_year = names(lines), stringsAsFactors = FALSE)
+head(attr)
+```
+
+* Combining the geometry and attributes back to an `sf` layer - 
+
+```{r}
+lines = st_sf(geometry, attr)
+lines
+```
+
+## Lines
+
+```{r}
+plot(lines)
+```
+
+## Lines to segments
+
+* To calculate segment azimuth, we split the lines to segments - 
+
+```{r}
+library(shadow)
+
+seg = 
+  lines %>% 
+  as("Spatial") %>% 
+  toSeg %>% 
+  st_as_sf
+seg
+```
+
+* Casting to `MULTIPOINT`; each segment is converted to a pair of points - 
+
+```{r}
+seg_pnt = st_cast(seg, "MULTIPOINT")
+seg_pnt
+```
+
+## Segment azimuth
+
+* Azimuth can be calculated with `bearingRhumb` from package `geosphere`
+* For example, here are the coordinates of the first storm segment - 
+
+```{r}
+x = st_coordinates(seg_pnt[1, ])
+x
+```
+
+* And here is its azimuth - 
+
+```{r}
+library(geosphere)
+
+bearingRhumb(x[1, 1:2], x[2, 1:2])
+```
+
+* Now, the same can be done for all segments
+* We create a list of segment coordinates - 
+
+```{r}
+coords = lapply(st_geometry(seg_pnt), st_coordinates)
+head(coords)
+```
+
+* Then apply `bearingRhumb` on the list - 
+
+```{r}
+seg$az = sapply(coords, function(x) bearingRhumb(x[1, 1:2], x[2, 1:2]))
+seg = seg[!is.na(seg$az), ] # Remove zero distance segments
+seg
+```
+
+* We also need the segment centroids for later - 
+
+```{r}
+seg_ctr = st_centroid(seg)
+seg_ctr
+```
+
+```{r}
+plot(seg_ctr)
+```
+
+## Make grid
+
+* Making a regular grid with a unique ID - 
+
+```{r}
+grid = st_make_grid(lines, cellsize = 2)
+grid = st_sf(grid, data.frame(id = 1:length(grid)))
+grid
+```
+
+```{r}
+plot(grid)
+```
+
+## Trajectory length per grid cell
+
+* Next we need to find the total trajectory length per grid cell
+* First we intersect the `grid` and `seg` layers, and calculate the length per segment -
+
+```{r}
+grid_seg = st_intersection(grid, seg)
+grid_seg$length = st_length(grid_seg)
+grid_seg
+```
+
+* Then we aggregate the table, summarizing total length -
+
+```{r}
+grid_seg_agg = aggregate(
+  x = st_set_geometry(grid_seg[, "length"], NULL), 
+  by = data.frame(id = grid_seg$id), 
+  FUN = sum
+)
+head(grid_seg_agg)
+```
+
+* And join back to the grid - 
+
+```{r}
+grid = left_join(grid, grid_seg_agg, "id")
+grid
+```
+
+```{r}
+plot(grid)
+```
+
+## Average segment azimuth
+
+* Azimuth should be averaged using circular statistics, for example -
+
+```{r}
+library(circular)
+
+angles = c(2, 359)
+
+# Simple mean
+mean(angles)
+
+# Circular mean
+anglecir = circular(angles, type="angles", units="degrees", modulo="2pi", template="geographics")
+as.numeric(mean(anglecir))
+```
+
+* And now for our data, averaging individual segment azimuths per grid cell -
+
+```{r}
+f = function(x) {
+  anglecir = circular(x, type="angles", units="degrees", modulo="2pi", template="geographics")
+  m = mean(anglecir)
+  as.numeric(m)
+}
+grid_b = aggregate(x = seg_ctr[, "az"], by = grid, FUN = f)
+grid_b
+```
+
+```{r}
+plot(grid_b)
+```
+
+## Grid centroids
+
+* For the final visualization we need the grid cell centroids - 
+
+```{r}
+grid_ctr = st_centroid(grid)
+```
+
+```{r}
+plot(grid_ctr)
+```
+
+* The average azimuths can be joined to the grid centroids using spatial join with `st_join` - 
+
+```{r}
+grid_ctr = st_join(grid_ctr, grid_b)
+grid_ctr = grid_ctr[!is.na(grid_ctr$az) & !is.na(grid_ctr$length), ]
+grid_ctr
+```
+
+```{r}
+plot(grid_ctr)
+```
+
+## Shift grid centroids
+
+* Grid cell centroids will comprise the segment staring point
+* To get the ending point, we shift the starting point - 
+    * In the direction of average storm segment azimuth
+    * With distance proportional to total segment length
+
+```{r}
+library(scales)
+
+grid_ctr_shifted = 
+  grid_ctr %>% 
+  as("Spatial") %>% 
+  shiftAz(
+    az = grid_ctr$az, 
+    dist = rescale(as.numeric(grid_ctr$length), c(0, 3))
+  ) %>% 
+  st_as_sf
+```
+
+```{r}
+plot(st_geometry(grid_ctr[1:3, ]))
+plot(st_geometry(grid_ctr_shifted[1:3, ]), col = "red", add = TRUE)
+```
+
+## Final table
+
+* The final table - 
+
+```{r}
+dat = cbind(
+  data.frame(
+    lon0 = st_coordinates(grid_ctr)[, 1],
+    lat0 = st_coordinates(grid_ctr)[, 2],
+    length = grid_ctr$length,
+    az = grid_ctr$az
+  ),
+  data.frame(
+    lon1 = st_coordinates(grid_ctr_shifted)[, 1],
+    lat1 = st_coordinates(grid_ctr_shifted)[, 2]
+  )
+)
+dat = dat[, c("lon0", "lat0", "lon1", "lat1", "length", "az")]
+head(dat)
+```
+
+## Initial plot
+
+```{r, fig.width=11}
+library(ggplot2)
+
+ggplot(dat) +
+  geom_sf(data = lines, colour = "lightgrey") +
+  geom_segment(aes(x = lon0, y = lat0, xend = lon1, yend = lat1)) +
+  theme_bw()
+```
+
+## Circular colors
+
+* Setting colors - 
+
+```{r}
+cols = circular.colors(n = 12)
+cols
+```
+
+* Setting color breaks - 
+
+```{r}
+dat$b1 = cut(dat$az, breaks = seq(0, 360, 30))
+head(dat)
+```
+
+## Final plot
+
+```{r, fig.width=11}
+ggplot(dat) +
+  geom_sf(data = lines, colour = "lightgrey", alpha = 0.1) +
+  geom_segment(
+    aes(x = lon0, y = lat0, xend = lon1, yend = lat1, size = length, colour = b1), 
+    arrow = arrow(length = unit(0.015, "npc"))
+  ) +
+  scale_size_continuous(range = c(0.15, 1), guide = FALSE) +
+  scale_color_manual("Azimuth (°)", values = cols) +
+  theme_bw() +
+  theme(
+    axis.title = element_blank()
+  )
+```
+
+## Summary
+
+* Often, much of the time in visualization is spent on reshaping the dataset to the right form
+
+## Other ideas
+
+* Equal-area grid
+* Weight by wind speed too, not just length
+* Segment centred on grid cell
+
+https://earth.nullschool.net/
+
+
+
+
+
